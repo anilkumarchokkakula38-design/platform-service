@@ -38,9 +38,9 @@ jobs:
             # In real world, might deploy to dev first, prod on release
             ENV="dev"
           fi
-          echo "environment=$ENV" >> $GITHUB_OUTPUT
-          echo "deploy=true" >> $GITHUB_OUTPUT
-          echo "Deploying to: $ENV"
+          echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "Deploying to: ${ENV}"
 
   # Build and push Docker image
   build:
@@ -88,7 +88,7 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
 
       - name: Output image name
-        run: echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.meta.outputs.digest }}" >> $GITHUB_OUTPUT
+        run: echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
         id: image
 
   # Scan for vulnerabilities
@@ -136,28 +136,28 @@ jobs:
           terraform_version: 1.6.0
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v1
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v1
+        uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to ${{ needs.determine-env.outputs.environment }}
         env:
           TF_ENV: ${{ needs.determine-env.outputs.environment }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}
         run: |
-          cd terraform/$TF_ENV
+          cd "terraform/${TF_ENV}"
           
-          echo "Deploying image: $IMAGE"
+          echo "Deploying image: ${IMAGE}"
           
           # Initialize Terraform
           terraform init
           
           # Plan deployment
           terraform plan \
-            -var="image=$IMAGE" \
+            -var="image=${IMAGE}" \
             -lock=false \
             -out=tfplan
           
@@ -165,25 +165,25 @@ jobs:
           terraform apply tfplan
           
           # Output the service URL
-          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** $TF_ENV" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** $IMAGE" >> $GITHUB_STEP_SUMMARY
-          echo "**Service URL:** $(terraform output -raw service_url)" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Environment:** ${TF_ENV}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Service URL:** $(terraform output -raw service_url)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify deployment
         env:
           TF_ENV: ${{ needs.determine-env.outputs.environment }}
         run: |
-          cd terraform/$TF_ENV
+          cd "terraform/${TF_ENV}"
           SERVICE_URL=$(terraform output -raw service_url)
-          echo "Service URL: $SERVICE_URL"
+          echo "Service URL: ${SERVICE_URL}"
           
           # Wait for service to be ready
           echo "Waiting for service to be ready..."
           for i in {1..30}; do
-            if curl -sf "$SERVICE_URL/health" > /dev/null 2>&1; then
+            if curl -sf "${SERVICE_URL}/health" > /dev/null 2>&1; then
               echo "✓ Service is healthy"
-              curl "$SERVICE_URL/version" | jq .
+              curl "${SERVICE_URL}/version" | jq .
               exit 0
             fi
             echo "Attempt $i/30: Service not ready yet, waiting..."
