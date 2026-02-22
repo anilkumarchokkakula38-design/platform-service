@@ -1,0 +1,14 @@
+project_id   = "your-gcp-project-id"
+region       = "us-central1"
+image        = "gcr.io/your-project/platform-service:latest"
+service_name = "platform-service-dev"
+cpu          = "0.25"
+memory       = "128Mi"
+min_instances = 0
+max_instances = 5
+log_level    = "DEBUG"
+
+labels = {
+  environment = "dev"
+  team        = "platform"
+}

@@ -1,0 +1,222 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Lint and test Python application
+  test:
+    runs-on: ubuntu-latest
+    name: Test & Lint
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint with flake8
+        continue-on-error: true
+        run: |
+          pip install flake8
+          flake8 app tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app tests --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml --cov-report=html
+
+      - name: Upload coverage reports
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  # Build and scan Docker image
+  docker:
+    runs-on: ubuntu-latest
+    name: Build & Scan Image
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+
+      - name: Run vulnerability scanner (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+          category: "trivy"
+
+  # Validate Terraform
+  terraform:
+    runs-on: ubuntu-latest
+    name: Terraform Validation
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Format Check (Dev)
+        run: |
+          cd terraform/dev
+          terraform fmt -check -recursive
+
+      - name: Terraform Format Check (Prod)
+        run: |
+          cd terraform/prod
+          terraform fmt -check -recursive
+
+      - name: Terraform Validation (Dev)
+        run: |
+          cd terraform/dev
+          terraform init -backend=false
+          terraform validate
+
+      - name: Terraform Validation (Prod)
+        run: |
+          cd terraform/prod
+          terraform init -backend=false
+          terraform validate
+
+      - name: Terraform Plan (Dev)
+        run: |
+          cd terraform/dev
+          terraform init -backend=false
+          terraform plan -lock=false -input=false -out=/tmp/dev.tfplan || true
+        continue-on-error: true
+
+      - name: Terraform Plan (Prod)
+        run: |
+          cd terraform/prod
+          terraform init -backend=false
+          terraform plan -lock=false -input=false -out=/tmp/prod.tfplan || true
+        continue-on-error: true
+
+  # Run container locally to verify it works
+  integration:
+    runs-on: ubuntu-latest
+    name: Container Integration Test
+    needs: docker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: platform-service:test
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+
+      - name: Run container
+        run: |
+          docker run -d \
+            --name platform-service-test \
+            -p 8080:8080 \
+            -e COMMIT_SHA=${{ github.sha }} \
+            -e SERVICE_NAME=platform-service \
+            -e ENVIRONMENT=test \
+            platform-service:test
+
+      - name: Wait for service to start
+        run: sleep 5
+
+      - name: Test health endpoint
+        run: |
+          curl -v http://localhost:8080/health
+          curl -v http://localhost:8080/
+          curl -v http://localhost:8080/version
+
+      - name: Verify health check response
+        run: |
+          HEALTH=$(curl -s http://localhost:8080/health)
+          echo "Health response: $HEALTH"
+          if echo "$HEALTH" | grep -q '"status":"OK"'; then
+            echo "✓ Health check passed"
+          else
+            echo "✗ Health check failed"
+            exit 1
+          fi
+
+      - name: Check service is running as non-root
+        run: |
+          # Check that container doesn't run as root (UID 0)
+          docker exec platform-service-test id
+          docker exec platform-service-test id | grep -q "uid=1000" && echo "✓ Running as non-root (1000)"
+
+      - name: Cleanup
+        if: always()
+        run: docker stop platform-service-test || true
+
+  # Prevent large files
+  file-size:
+    runs-on: ubuntu-latest
+    name: File Size Check
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for large files
+        run: |
+          # Warn if any files exceed 10MB
+          find . -type f -size +10M | while read file; do
+            echo "⚠️ Warning: Large file found: $file"
+          done || true
