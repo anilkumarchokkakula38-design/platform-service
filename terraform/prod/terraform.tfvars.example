@@ -1,0 +1,14 @@
+project_id   = "your-gcp-project-id"
+region       = "us-central1"
+image        = "gcr.io/your-project/platform-service:latest"
+service_name = "platform-service"
+cpu          = "0.5"
+memory       = "256Mi"
+min_instances = 1
+max_instances = 20
+log_level    = "INFO"
+
+labels = {
+  environment = "prod"
+  team        = "platform"
+}
