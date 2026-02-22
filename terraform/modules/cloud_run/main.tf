@@ -68,8 +68,8 @@ resource "google_cloud_run_service" "platform_service" {
         }
       )
       annotations = {
-        autoscaling.knative.dev/minScale = var.min_instances
-        autoscaling.knative.dev/maxScale = var.max_instances
+        "autoscaling.knative.dev/minScale" = var.min_instances
+        "autoscaling.knative.dev/maxScale" = var.max_instances
       }
     }
   }
