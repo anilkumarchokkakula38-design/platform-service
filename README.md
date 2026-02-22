@@ -190,23 +190,75 @@ terraform fmt -check -recursive
 Result: Pass/Fail prevents merge if checks fail
 ```
 
-#### Production Deployment (Triggered on Push to main)
+#### Dev Deployment (Triggered on Push to develop)
 ```
-✓ All PR checks run
+✓ All tests and linting pass
 ✓ Build & push Docker image to GHCR
 ✓ Tag image with commit SHA (immutable)
 ✓ Scan for vulnerabilities
-✓ Run Terraform apply to prod
+✓ Run Terraform apply to terraform/dev
 ✓ Verify service health
-✓ Output service URL
+✓ Uses GCP_SA_KEY_dev secret for authentication
+
+Result: Automatic deployment to development
+```
+
+#### Prod Deployment (Triggered on Push to main)
+```
+✓ All tests and linting pass
+✓ Build & push Docker image to GHCR
+✓ Tag image with commit SHA (immutable)
+✓ Scan for vulnerabilities
+✓ Run Terraform apply to terraform/prod
+✓ Verify service health
+✓ Uses GCP_SA_KEY_prod secret for authentication
 
 Result: Automatic deployment to production
 ```
 
 ### CI/CD Workflows
 
-**Development**: Manual trigger (workflow_dispatch)
-**Production**: Automatic on merge to main (immutable image by commit SHA)
+**Develop Branch**: Automatic deployment to dev on push (development environment)
+**Main Branch**: Automatic deployment to prod on push (production environment)
+**Manual Override**: Use workflow_dispatch to manually trigger any environment
+
+---
+
+## GitHub Secrets Setup
+
+### Required Secrets for CI/CD
+
+You must configure two environment-specific GCP service account secrets in GitHub:
+
+#### 1. `GCP_SA_KEY_dev`
+- **Purpose**: Google Cloud authentication for development deployments
+- **Used by**: Workflow when deploying to `develop` branch → `terraform/dev`
+- **Setup**:
+  1. Create a GCP service account for dev: `platform-service-dev`
+  2. Grant roles: `roles/run.admin`, `roles/iam.serviceAccountUser`
+  3. Generate JSON key
+  4. GitHub → Settings → Secrets and variables → Actions → New repository secret
+  5. Name: `GCP_SA_KEY_dev`
+  6. Paste entire JSON key content
+
+#### 2. `GCP_SA_KEY_prod`
+- **Purpose**: Google Cloud authentication for production deployments
+- **Used by**: Workflow when deploying to `main` branch → `terraform/prod`
+- **Setup**:
+  1. Create a GCP service account for prod: `platform-service-prod`
+  2. Grant roles: `roles/run.admin`, `roles/iam.serviceAccountUser` (with additional audit logging)
+  3. Generate JSON key
+  4. GitHub → Settings → Secrets and variables → Actions → New repository secret
+  5. Name: `GCP_SA_KEY_prod`
+  6. Paste entire JSON key content
+
+### Recommended Best Practices
+
+✅ **Separate GCP Projects**: Use different GCP projects for dev and prod
+✅ **Minimal Permissions**: Each secret has only required roles
+✅ **Key Rotation**: Rotate keys every 90 days
+✅ **Audit Logging**: Enable Cloud Audit Logs for prod
+✅ **Backup Keys**: Store backup keys securely (not in GitHub)
 
 ---
 
@@ -226,13 +278,13 @@ develop (staging)
 
 ### Branch Types & Deployment
 
-| Branch | Source | Deploy | Protection |
-|--------|--------|--------|-----------|
-| `main` | develop | ✅ Automatic | ✅ Yes |
-| `develop` | feature/* | Manual | ✅ Yes |
-| `feature/*` | develop | ❌ No | No |
-| `bugfix/*` | develop | ❌ No | No |
-| `hotfix/*` | main | ✅ Automatic | No |
+| Branch | Source | Auto-Deploy | Environment | Secret |
+|--------|--------|-------------|-------------|--------|
+| `main` | develop | ✅ Yes | Production | `GCP_SA_KEY_prod` |
+| `develop` | feature/* | ✅ Yes | Development | `GCP_SA_KEY_dev` |
+| `feature/*` | develop | ❌ No | N/A | N/A |
+| `bugfix/*` | develop | ❌ No | N/A | N/A |
+| `hotfix/*` | main | ✅ Yes | Production | `GCP_SA_KEY_prod` |
 
 ### Feature Development Workflow
 

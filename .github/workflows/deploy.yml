@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - develop
   workflow_dispatch:
     inputs:
       environment:
@@ -34,9 +35,15 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             ENV="${{ github.event.inputs.environment }}"
           else
-            # For push to main, deploy to both environments
-            # In real world, might deploy to dev first, prod on release
-            ENV="dev"
+            # Deploy develop branch to dev, main branch to prod
+            if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+              ENV="dev"
+            elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              ENV="prod"
+            else
+              echo "Unsupported branch: ${{ github.ref }}"
+              exit 1
+            fi
           fi
           echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
           echo "deploy=true" >> "$GITHUB_OUTPUT"
@@ -138,7 +145,7 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets[format('GCP_SA_KEY_{0}', needs.determine-env.outputs.environment)] }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
