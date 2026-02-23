@@ -41,7 +41,6 @@ curl http://localhost:8080/version
 ```
 
 #### Option 2: Docker Compose (Recommended)
-
 ```bash
 docker-compose up
 curl http://localhost:8080/health
