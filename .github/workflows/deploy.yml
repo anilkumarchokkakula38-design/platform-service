@@ -1,0 +1,222 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to (dev or prod)"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Determine which environment to deploy to
+  determine-env:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.determine.outputs.environment }}
+      deploy: ${{ steps.determine.outputs.deploy }}
+    
+    steps:
+      - name: Determine environment
+        id: determine
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          else
+            # Deploy develop branch to dev, main branch to prod
+            if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+              ENV="dev"
+            elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              ENV="prod"
+            else
+              echo "Unsupported branch: ${{ github.ref }}"
+              exit 1
+            fi
+          fi
+          echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "Deploying to: ${ENV}"
+
+  # Build and push Docker image
+  build:
+    runs-on: ubuntu-latest
+    name: Build & Push Image
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+
+      - name: Output image name
+        run: echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+        id: image
+
+  # Scan for vulnerabilities
+  scan:
+    runs-on: ubuntu-latest
+    name: Scan Built Image
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run vulnerability scanner (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+          category: "trivy"
+
+  # Deploy to target environment
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to ${{ needs.determine-env.outputs.environment }}
+    needs: [determine-env, build, scan]
+    if: ${{ needs.determine-env.outputs.deploy == 'true' }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets[format('GCP_SA_KEY_{0}', needs.determine-env.outputs.environment)] }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to ${{ needs.determine-env.outputs.environment }}
+        env:
+          TF_ENV: ${{ needs.determine-env.outputs.environment }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ github.sha }}
+        run: |
+          cd "terraform/${TF_ENV}"
+          
+          echo "Deploying image: ${IMAGE}"
+          
+          # Initialize Terraform
+          terraform init
+          
+          # Plan deployment
+          terraform plan \
+            -var="image=${IMAGE}" \
+            -lock=false \
+            -out=tfplan
+          
+          # Apply
+          terraform apply tfplan
+          
+          # Output the service URL
+          {
+            echo "## Deployment Complete"
+            echo "**Environment:** ${TF_ENV}"
+            echo "**Image:** ${IMAGE}"
+            echo "**Service URL:** $(terraform output -raw service_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify deployment
+        env:
+          TF_ENV: ${{ needs.determine-env.outputs.environment }}
+        run: |
+          cd "terraform/${TF_ENV}"
+          SERVICE_URL=$(terraform output -raw service_url)
+          echo "Service URL: ${SERVICE_URL}"
+          
+          # Wait for service to be ready
+          echo "Waiting for service to be ready..."
+          for i in {1..30}; do
+            if curl -sf "${SERVICE_URL}/health" > /dev/null 2>&1; then
+              echo "✓ Service is healthy"
+              curl "${SERVICE_URL}/version" | jq .
+              exit 0
+            fi
+            echo "Attempt $i/30: Service not ready yet, waiting..."
+            sleep 10
+          done
+          
+          echo "✗ Service failed to become healthy"
+          exit 1
+
+  # Notify on failure
+  notify-failure:
+    runs-on: ubuntu-latest
+    name: Notify Deployment Failure
+    needs: deploy
+    if: failure()
+    
+    steps:
+      - name: Comment on commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: `❌ Deployment failed for commit ${context.sha.substring(0, 7)}\n\n[View workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})`
+            })
